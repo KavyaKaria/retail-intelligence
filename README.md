@@ -13,30 +13,31 @@ The platform implements a Medallion Architecture across cloud storage, lakehouse
 ```mermaid
 flowchart TD
     subgraph Storage["1. Cloud Storage"]
-        A["Azure Blob Storage<br/>(Raw CSV Datasets)"]
+        A["Azure Blob Storage<br/>(retail2026 / raw)"]
     end
 
     subgraph Databricks["2. Databricks Lakehouse (PySpark & Delta Lake)"]
-        B["Bronze Layer<br/>Raw Ingestion & Schema Enforcement"]
-        C["Silver Layer<br/>Deduplication, Cleansing & Null Imputation"]
-        D["Gold Layer & ML<br/>KPI Engineering & Random Forest Forecasting"]
-        B --> C --> D
+        B["Bronze Layer: bronze_layer<br/>Raw Ingestion & Schema Enforcement"]
+        C["Silver Layer: silver_layer_sales<br/>Cleansing, Deduplication & Imputation"]
+        D["ML & Gold: 03_ml_sales_forecasting_random_forest<br/>Random Forest Sales Forecasting & Metrics"]
+        E["Snowflake Export: gold_layer_connection<br/>Delta to Snowflake Pushdown"]
+        B --> C --> D --> E
     end
 
-    subgraph Warehouse["3. Snowflake Data Cloud"]
-        E["Raw Staging Tables<br/>(Spark Connector Export)"]
-        F["dbt Transformations<br/>(Dimensional Modeling)"]
-        G["Gold Marts<br/>(Fact & Dimension Star Schema)"]
-        E --> F --> G
+    subgraph Warehouse["3. Snowflake Data Cloud & dbt"]
+        F["Raw Staging Tables<br/>(Landing Zone)"]
+        G["dbt Pipeline: dbt_pipeline<br/>(Dimensional Star Schema & Tests)"]
+        H["Gold Marts<br/>(DIM_STORE, DIM_DATE, FACT_SALES)"]
+        F --> G --> H
     end
 
     subgraph Analytics["4. Analytics & BI"]
-        H["Power BI Executive Cockpit<br/>(Descriptive · Diagnostic · Predictive · Prescriptive)"]
+        I["Power BI Executive Cockpit<br/>(Descriptive · Diagnostic · Predictive · Prescriptive)"]
     end
 
     A --> B
-    D --> E
-    G --> H
+    E --> F
+    H --> I
 ```
 
 ---
@@ -48,11 +49,12 @@ retail-intelligence/
 ├── azure/
 │   └── dataset_link.txt                        # Dataset source link and Azure storage details
 ├── databricks_notebooks/
-│   ├── 01_silver_cleaning_and_merging.py       # Data cleansing, missing value imputation
-│   ├── 02_gold_feature_engineering_and_analytics.py # Business KPIs & competition distance tiers
-│   ├── 03_ml_sales_forecasting_random_forest.py# Random Forest sales forecasting model
-│   ├── 04_snowflake_export.py                  # Snowflake export connector
-│   └── README.md                               # Notebook execution instructions
+│   ├── bronze_layer.ipynb                      # Raw ingestion from Azure Blob Storage into Delta Lake
+│   ├── silver_layer_sales.ipynb                # Data cleansing, missing value imputation & merging
+│   ├── 03_ml_sales_forecasting_random_forest.ipynb # Random Forest sales forecasting model (Ml_model)
+│   ├── gold_layer_connection.ipynb             # Feature store export & Snowflake pushdown connector
+│   ├── dbt_pipeline.ipynb                      # dbt transformation orchestration notebook
+│   └── README.md                               # Databricks execution guide
 ├── dbt_models/
 │   ├── dbt_project.yml                         # dbt project configuration
 │   ├── sources.yml                             # Snowflake sources & test constraints
@@ -89,25 +91,27 @@ retail-intelligence/
 ## ⚡ Medallion Data Pipeline
 
 ### 1. Bronze Layer (Raw Ingestion)
-- **Source**: Azure Blob Storage (`retail2026/raw`).
+- **Source**: Azure Blob Storage container (`retail2026/raw`).
 - **Files**: `train.csv` (1,017,209 sales records), `store.csv` (1,115 store profiles), `test.csv` (41,088 evaluation records).
-- **Processing**: Ingested via PySpark with explicit schema definitions and audit timestamps.
+- **Processing Notebook**: `bronze_layer.ipynb`. Ingests raw CSVs via PySpark into raw Delta Lake format with metadata and schema validation.
 
 ### 2. Silver Layer (Cleaned & Harmonized)
+- **Processing Notebook**: `silver_layer_sales.ipynb`.
 - **Imputation**: Filled missing `CompetitionDistance` using median values (5,458m) and imputed missing promo flags.
 - **Normalization**: Standardized date formats, encoded categorical features (`StoreType`, `Assortment`), and separated open store sales from scheduled closures.
 - **Output Tables**: `silver_sales`, `silver_stores`.
 
-### 3. Gold Layer (Analytical Modeling & ML)
-- **Star Schema**: Modeled into fact and dimension tables via **dbt** inside **Snowflake**:
+### 3. Gold Layer & Machine Learning
+- **Forecasting Notebook**: `03_ml_sales_forecasting_random_forest.ipynb` (`Ml_model`).
+  - Algorithm: **Random Forest Regressor** (Scikit-Learn).
+  - Validation Accuracy: **86.6% (0.134 RMSPE)** across 41,188 test records.
+  - Forecast Output: 48-day daily store sales forecasts with confidence intervals.
+- **Snowflake Pushdown Notebook**: `gold_layer_connection.ipynb`. Connects to Snowflake and writes clean Delta datasets and predictions into Snowflake `RAW` schema.
+- **Dimensional Modeling**: Modeled into fact and dimension tables via **dbt** (`dbt_pipeline.ipynb`):
   - `dim_store`: Store attributes, assortment, and competition tiers.
   - `dim_date`: Calendar dates, day names, and state/school holiday indicators.
   - `fact_sales`: Transactional sales, customer footfall, and promotion flags.
   - `fact_store_closures`: Non-operational store days classified by reason (Sundays, holidays, refurbishment).
-- **Machine Learning**:
-  - Algorithm: **Random Forest Regressor** (Scikit-Learn).
-  - Validation Accuracy: **86.6% (0.134 RMSPE)** across 41,188 test records.
-  - Forecast Output: 48-day daily store sales forecasts with confidence intervals.
 
 ---
 
@@ -146,28 +150,50 @@ Data integrity is validated across all layers using **dbt** test suites and cust
 
 ## 🚀 How to Run
 
-1. **Databricks Processing**:
-   - Run `01_silver_cleaning_and_merging.py` to clean and standardize raw data.
-   - Run `02_gold_feature_engineering_and_analytics.py` to create analytical features.
-   - Run `03_ml_sales_forecasting_random_forest.py` to train the model and generate predictions.
-   - Run `04_snowflake_export.py` to load data into Snowflake.
+### Step 1: Azure Storage Setup
+1. In your **Azure Portal**, open the Storage Account and navigate to the Blob container:
+   - Container path: `retail2026/raw/`
+2. Upload the raw Rossmann CSV files:
+   - `train.csv` (historical sales)
+   - `store.csv` (store metadata)
+   - `test.csv` (future horizon test data)
 
-2. **dbt Transformation**:
-   ```bash
-   cd dbt_models
-   dbt deps
-   dbt run
-   dbt test
-   ```
+### Step 2: Databricks Pipeline Execution
+Run the notebooks in the Databricks workspace in the following order:
 
-3. **Power BI**:
-   - Open `Power BI dashboard.pbix`.
-   - Connect to your Snowflake database.
-   - Refresh to update the dashboard pages.
+1. **Bronze Ingestion**:
+   - Run `bronze_layer` (or `bronze_layer.ipynb`)
+   - Mounts/reads the Azure Blob storage container and creates raw Delta Lake tables with audit timestamps.
+2. **Silver Cleansing & Imputation**:
+   - Run `silver_layer_sales` (or `silver_layer_sales.ipynb`)
+   - Imputes missing competition distances, standardizes dates, and separates valid sales transactions from closures.
+3. **Machine Learning Demand Forecasting**:
+   - Run `03_ml_sales_forecasting_random_forest` (or `Ml_model`)
+   - Trains the Random Forest Regressor and generates predicted sales with RMSPE evaluation.
+4. **Snowflake Export**:
+   - Run `gold_layer_connection` (or `gold_layer_connection.ipynb`)
+   - Uses the Spark-Snowflake connector (fetching credentials from Databricks Secrets scope `retail-scope`) to load Silver and Gold datasets into Snowflake.
+5. **dbt Transformation Pipeline**:
+   - Run `dbt_pipeline` (or `dbt_pipeline.ipynb`)
+   - Executes dbt models inside Snowflake to build the dimensional star schema marts.
+
+### Step 3: dbt Local CLI (Alternative Execution)
+If executing dbt directly via CLI:
+```bash
+cd dbt_models
+dbt deps
+dbt run
+dbt test
+```
+
+### Step 4: Power BI Analytics Cockpit
+1. Open `Power BI dashboard.pbix` in Power BI Desktop.
+2. Configure the Snowflake connection credentials (`RETAIL_INTELLIGENCE` database, `GOLD` schema).
+3. Click **Refresh Data** to populate the 4 interactive reporting pages.
 
 
 ---
 
-## 👤 Author
-**Kavya Karia**   
+## 👤 Done by
+**Kavya Karia**  
 Retail Intelligence Platform Capstone Project
